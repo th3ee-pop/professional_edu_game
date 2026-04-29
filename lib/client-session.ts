@@ -27,20 +27,38 @@ export function storeSession(session: { id: string; classCode: string; startedAt
 
 export async function ensureStudentSession(classCode: string) {
   const stored = getStoredSession();
-  if (stored?.classCode === classCode) return stored;
 
-  const response = await fetch("/api/session/start", {
+  const response = await startSessionRequest(classCode, stored?.classCode === classCode ? stored.id : undefined);
+  if (!response.ok) {
+    const retry = await startSessionRequest(classCode);
+    if (!retry.ok) throw new Error("无法创建课堂会话");
+    window.localStorage.removeItem(queueKey);
+    return persistSession(await retry.json(), stored?.id);
+  }
+  return persistSession(await response.json(), stored?.id);
+}
+
+async function startSessionRequest(classCode: string, existingSessionId?: string) {
+  return fetch("/api/session/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ classCode, deviceType: navigator.userAgent })
+    body: JSON.stringify({
+      classCode,
+      deviceType: navigator.userAgent,
+      existingSessionId
+    })
   });
-  if (!response.ok) throw new Error("无法创建课堂会话");
-  const data = await response.json();
+}
+
+function persistSession(data: { session: { id: string; classCode: string; startedAt: string } }, previousId?: string) {
   const session = {
     id: data.session.id as string,
     classCode: data.session.classCode as string,
     startedAt: data.session.startedAt as string
   };
+  if (previousId && previousId !== session.id) {
+    window.localStorage.removeItem(queueKey);
+  }
   storeSession(session);
   return session;
 }

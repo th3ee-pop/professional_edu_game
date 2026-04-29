@@ -28,3 +28,6 @@ pnpm-debug.log*
 # misc
 .vercel/
 coverage/
+
+# Local Netlify folder
+.netlify

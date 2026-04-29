@@ -107,10 +107,23 @@ export async function getOrCreateClassSession(classCode: string): Promise<ClassS
   return classSession;
 }
 
-export async function startStudentSession(classCode: string, deviceType: string): Promise<StudentSession> {
+export async function startStudentSession(classCode: string, deviceType: string, existingSessionId?: string): Promise<StudentSession> {
   const classSession = await getOrCreateClassSession(classCode);
   const pool = getPool();
   if (pool) {
+    if (existingSessionId) {
+      const existing = await pool.query<StudentSessionRow>(
+        `
+        select id, class_session_id, class_code, device_type, started_at, completed_at, manufacturing_done, nursing_done
+        from public.student_sessions
+        where id = $1 and class_session_id = $2
+        limit 1
+        `,
+        [existingSessionId, classSession.id]
+      );
+      if (existing.rows[0]) return fromStudentRow(existing.rows[0]);
+    }
+
     const result = await pool.query<StudentSessionRow>(
       `
       insert into public.student_sessions (
@@ -126,6 +139,11 @@ export async function startStudentSession(classCode: string, deviceType: string)
       [classSession.id, classSession.classCode, deviceType || "unknown"]
     );
     return fromStudentRow(result.rows[0]);
+  }
+
+  if (existingSessionId) {
+    const existing = store().students.find((student) => student.id === existingSessionId && student.classSessionId === classSession.id);
+    if (existing) return existing;
   }
 
   const student: StudentSession = {
@@ -269,8 +287,9 @@ export async function getTeacherSummary(classCode: string): Promise<Summary> {
   const classSession = await getOrCreateClassSession(classCode);
   const pool = getPool();
   if (pool) {
-    const [students, events, attempts] = await Promise.all([
-      pool.query<StudentSessionRow>(
+    const client = await pool.connect();
+    try {
+      const students = await client.query<StudentSessionRow>(
         `
         select id, class_session_id, class_code, device_type, started_at, completed_at, manufacturing_done, nursing_done
         from public.student_sessions
@@ -278,8 +297,8 @@ export async function getTeacherSummary(classCode: string): Promise<Summary> {
         order by started_at asc
         `,
         [classSession.id]
-      ),
-      pool.query<TrackingEventRow>(
+      );
+      const events = await client.query<TrackingEventRow>(
         `
         select id, class_session_id, student_session_id, game_id, event_type, target_id, payload, occurred_at, created_at
         from public.events
@@ -287,8 +306,8 @@ export async function getTeacherSummary(classCode: string): Promise<Summary> {
         order by occurred_at asc
         `,
         [classSession.id]
-      ),
-      pool.query<GameAttemptRow>(
+      );
+      const attempts = await client.query<GameAttemptRow>(
         `
         select id, class_session_id, student_session_id, game_id, score, result_label, started_at, completed_at, answers
         from public.game_attempts
@@ -296,14 +315,16 @@ export async function getTeacherSummary(classCode: string): Promise<Summary> {
         order by completed_at asc
         `,
         [classSession.id]
-      )
-    ]);
-    return buildSummary(
-      classSession,
-      students.rows.map(fromStudentRow),
-      events.rows.map(fromEventRow),
-      attempts.rows.map(fromAttemptRow)
-    );
+      );
+      return buildSummary(
+        classSession,
+        students.rows.map(fromStudentRow),
+        events.rows.map(fromEventRow),
+        attempts.rows.map(fromAttemptRow)
+      );
+    } finally {
+      client.release();
+    }
   }
 
   const state = store();
