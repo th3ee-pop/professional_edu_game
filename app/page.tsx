@@ -3,13 +3,16 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { defaultClassCode } from "@/lib/scenarios";
+import { LoadingButton } from "@/components/LoadingButton";
 
 export default function HomePage() {
   const router = useRouter();
   const [classCode, setClassCode] = useState(defaultClassCode);
+  const [isEntering, setIsEntering] = useState(false);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setIsEntering(true);
     router.push(`/play/${encodeURIComponent(classCode.trim().toUpperCase() || defaultClassCode)}`);
   }
 
@@ -30,10 +33,13 @@ export default function HomePage() {
               className="form-input"
               aria-label="课堂码"
               value={classCode}
+              disabled={isEntering}
               onChange={(event) => setClassCode(event.target.value)}
               placeholder="输入课堂码"
             />
-            <button className="primary-button" type="submit">进入课堂任务</button>
+            <LoadingButton loading={isEntering} loadingText="正在进入课堂" type="submit">
+              进入课堂任务
+            </LoadingButton>
           </form>
           <div className="flex flex-wrap gap-2.5">
             <a className="secondary-button" href="/teacher/login">教师后台</a>

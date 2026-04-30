@@ -6,10 +6,12 @@ import type { Summary } from "@/lib/types";
 export function TeacherDashboard({ classCode }: { classCode: string }) {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     let active = true;
     async function load() {
+      if (active) setIsRefreshing(true);
       try {
         const response = await fetch(`/api/teacher/summary?classCode=${encodeURIComponent(classCode)}`, { cache: "no-store" });
         if (!response.ok) throw new Error("无法读取教师分析数据");
@@ -20,6 +22,8 @@ export function TeacherDashboard({ classCode }: { classCode: string }) {
         }
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "加载失败");
+      } finally {
+        if (active) setIsRefreshing(false);
       }
     }
     void load();
@@ -48,7 +52,10 @@ export function TeacherDashboard({ classCode }: { classCode: string }) {
           <h1 className="page-title">{summary.classSession.title}</h1>
           <p className="lead">每 8 秒刷新一次。当前已采集 {summary.eventCount} 条匿名过程事件。</p>
         </div>
-        <span className="pill">更新 {new Date(summary.generatedAt).toLocaleTimeString()}</span>
+        <span className="pill">
+          {isRefreshing ? <span className="mr-2 inline-block size-3 animate-spin rounded-full border-2 border-current border-t-transparent" /> : null}
+          {isRefreshing ? "同步中" : `更新 ${new Date(summary.generatedAt).toLocaleTimeString()}`}
+        </span>
       </header>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

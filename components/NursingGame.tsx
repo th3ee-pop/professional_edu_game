@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ensureStudentSession, flushEvents, getStoredSession, track } from "@/lib/client-session";
 import { criticalNursingOrder, nursingMessages, nursingSteps } from "@/lib/scenarios";
+import { LoadingButton } from "./LoadingButton";
 
 export function NursingGame({ classCode }: { classCode: string }) {
   const router = useRouter();
@@ -13,6 +14,8 @@ export function NursingGame({ classCode }: { classCode: string }) {
   const [hintOpen, setHintOpen] = useState(false);
   const [startedAt] = useState(new Date().toISOString());
   const [studentSessionId, setStudentSessionId] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
 
   const session = getStoredSession();
 
@@ -63,32 +66,41 @@ export function NursingGame({ classCode }: { classCode: string }) {
   }, [abnormal, message, steps]);
 
   async function submit() {
-    if (!session) return;
-    const missing = criticalNursingOrder.filter((item) => !steps.includes(item));
-    const label = score >= 82 ? "流程安全且沟通充分" : missing.length ? "存在流程遗漏" : "需要改善沟通或异常判断";
-    track({
-      studentSessionId: session.id,
-      classCode,
-      gameId: "nursing",
-      eventType: "attempt_submit",
-      targetId: "nursing",
-      payload: { steps, message, abnormal, score, missing }
-    });
-    await flushEvents();
-    await fetch("/api/attempt/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        studentSessionId: session.id,
+    if (isSubmitting) return;
+    setSubmitError("");
+    setIsSubmitting(true);
+    try {
+      const activeSession = session || await ensureStudentSession(classCode);
+      const missing = criticalNursingOrder.filter((item) => !steps.includes(item));
+      const label = score >= 82 ? "流程安全且沟通充分" : missing.length ? "存在流程遗漏" : "需要改善沟通或异常判断";
+      track({
+        studentSessionId: activeSession.id,
         classCode,
         gameId: "nursing",
-        score,
-        resultLabel: label,
-        startedAt,
-        answers: { steps, message, abnormal, missing }
-      })
-    });
-    router.push("/done");
+        eventType: "attempt_submit",
+        targetId: "nursing",
+        payload: { steps, message, abnormal, score, missing }
+      });
+      await flushEvents();
+      const response = await fetch("/api/attempt/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentSessionId: activeSession.id,
+          classCode,
+          gameId: "nursing",
+          score,
+          resultLabel: label,
+          startedAt,
+          answers: { steps, message, abnormal, missing }
+        })
+      });
+      if (!response.ok) throw new Error("提交失败");
+      router.push("/done");
+    } catch {
+      setSubmitError("保存护理任务失败，请检查网络后再试一次。");
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -99,6 +111,7 @@ export function NursingGame({ classCode }: { classCode: string }) {
         <button
           className="secondary-button mt-4"
           type="button"
+          disabled={isSubmitting}
           onClick={() => {
             setHintOpen(true);
             if (studentSessionId) track({ studentSessionId, classCode, gameId: "nursing", eventType: "hint_open", targetId: "nursing_flow_hint", payload: {} });
@@ -114,7 +127,7 @@ export function NursingGame({ classCode }: { classCode: string }) {
           <h2>选择并排列护理步骤</h2>
           <div className="grid gap-2.5">
             {nursingSteps.map((step) => (
-              <button className={`step-choice ${steps.includes(step.id) ? "active" : ""}`} key={step.id} onClick={() => toggleStep(step.id)} type="button">
+              <button className={`step-choice ${steps.includes(step.id) ? "active" : ""}`} disabled={isSubmitting} key={step.id} onClick={() => toggleStep(step.id)} type="button">
                 {step.label}
               </button>
             ))}
@@ -129,8 +142,8 @@ export function NursingGame({ classCode }: { classCode: string }) {
                 <div className="choice active" key={stepId}>
                   <strong>{index + 1}. {step?.label}</strong>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button className="secondary-button min-h-9 px-3" onClick={() => moveStep(stepId, -1)} type="button">上移</button>
-                    <button className="secondary-button min-h-9 px-3" onClick={() => moveStep(stepId, 1)} type="button">下移</button>
+                    <button className="secondary-button min-h-9 px-3" disabled={isSubmitting} onClick={() => moveStep(stepId, -1)} type="button">上移</button>
+                    <button className="secondary-button min-h-9 px-3" disabled={isSubmitting} onClick={() => moveStep(stepId, 1)} type="button">下移</button>
                   </div>
                 </div>
               );
@@ -143,7 +156,7 @@ export function NursingGame({ classCode }: { classCode: string }) {
         <h2>选择沟通回应</h2>
         <div className="grid gap-2.5">
           {nursingMessages.map((item) => (
-            <button className={`choice ${message === item.id ? "active" : ""}`} key={item.id} onClick={() => {
+            <button className={`choice ${message === item.id ? "active" : ""}`} disabled={isSubmitting} key={item.id} onClick={() => {
               if (message && message !== item.id && studentSessionId) track({ studentSessionId, classCode, gameId: "nursing", eventType: "answer_changed", targetId: "communication", payload: { from: message, to: item.id } });
               setMessage(item.id);
             }} type="button">
@@ -156,15 +169,24 @@ export function NursingGame({ classCode }: { classCode: string }) {
       <section className="panel">
         <h2>异常判断</h2>
         <div className="grid gap-2.5">
-          <button className={`choice ${abnormal === "report" ? "active" : ""}`} onClick={() => setAbnormal("report")} type="button">疼痛加重且心率升高，复测后报告医生并记录</button>
-          <button className={`choice ${abnormal === "wait" ? "active" : ""}`} onClick={() => setAbnormal("wait")} type="button">先安慰患者，暂不报告，等待下一次巡视</button>
-          <button className={`choice ${abnormal === "medicine" ? "active" : ""}`} onClick={() => setAbnormal("medicine")} type="button">直接给止痛药，不需要重新评估</button>
+          <button className={`choice ${abnormal === "report" ? "active" : ""}`} disabled={isSubmitting} onClick={() => setAbnormal("report")} type="button">疼痛加重且心率升高，复测后报告医生并记录</button>
+          <button className={`choice ${abnormal === "wait" ? "active" : ""}`} disabled={isSubmitting} onClick={() => setAbnormal("wait")} type="button">先安慰患者，暂不报告，等待下一次巡视</button>
+          <button className={`choice ${abnormal === "medicine" ? "active" : ""}`} disabled={isSubmitting} onClick={() => setAbnormal("medicine")} type="button">直接给止痛药，不需要重新评估</button>
         </div>
         <div className="score-band mt-4">
           <span className="font-black tabular-nums">过程完整度 {score}</span>
           <div className="progress-track"><div className="progress-fill" style={{ width: `${score}%` }} /></div>
         </div>
-        <button className="primary-button mt-4 w-full sm:w-fit" disabled={steps.length < 4 || !message || !abnormal} onClick={submit} type="button">提交护理任务</button>
+        <LoadingButton
+          className="primary-button mt-4 w-full sm:w-fit"
+          disabled={steps.length < 4 || !message || !abnormal}
+          loading={isSubmitting}
+          loadingText="正在保存护理任务"
+          onClick={submit}
+        >
+          提交护理任务
+        </LoadingButton>
+        {submitError ? <p className="mt-3 font-bold text-danger">{submitError}</p> : null}
       </section>
     </div>
   );

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ensureStudentSession, flushEvents, getStoredSession, track } from "@/lib/client-session";
 import { evidenceOptions, manufacturingOptions, manufacturingTabs } from "@/lib/scenarios";
+import { LoadingButton } from "./LoadingButton";
 
 const chartCopy: Record<string, { title: string; note: string; legend: [string, string]; rows: Array<[string, string, string]> }> = {
   "ai-warning": {
@@ -56,6 +57,8 @@ export function ManufacturingGame({ classCode }: { classCode: string }) {
   const [evidence, setEvidence] = useState<string[]>([]);
   const [reflection, setReflection] = useState("");
   const [hintOpen, setHintOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [startedAt] = useState(new Date().toISOString());
 
   useEffect(() => {
@@ -106,32 +109,40 @@ export function ManufacturingGame({ classCode }: { classCode: string }) {
   }
 
   async function submit() {
-    const session = getStoredSession();
-    if (!session) return;
-    const label = score >= 80 ? "证据整合较充分" : decision === "ignore" ? "存在忽视风险" : "需要补充证据解释";
-    track({
-      studentSessionId: session.id,
-      classCode,
-      gameId: "manufacturing",
-      eventType: "attempt_submit",
-      targetId: "manufacturing",
-      payload: { decision, evidence, score }
-    });
-    await flushEvents();
-    await fetch("/api/attempt/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    if (isSubmitting) return;
+    setSubmitError("");
+    setIsSubmitting(true);
+    try {
+      const session = getStoredSession() || await ensureStudentSession(classCode);
+      const label = score >= 80 ? "证据整合较充分" : decision === "ignore" ? "存在忽视风险" : "需要补充证据解释";
+      track({
         studentSessionId: session.id,
         classCode,
         gameId: "manufacturing",
-        score,
-        resultLabel: label,
-        startedAt,
-        answers: { decision, evidence, reflection }
-      })
-    });
-    router.push(`/play/${classCode}/nursing`);
+        eventType: "attempt_submit",
+        targetId: "manufacturing",
+        payload: { decision, evidence, score }
+      });
+      await flushEvents();
+      const response = await fetch("/api/attempt/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentSessionId: session.id,
+          classCode,
+          gameId: "manufacturing",
+          score,
+          resultLabel: label,
+          startedAt,
+          answers: { decision, evidence, reflection }
+        })
+      });
+      if (!response.ok) throw new Error("提交失败");
+      router.push(`/play/${classCode}/nursing`);
+    } catch {
+      setSubmitError("保存诊断结果失败，请检查网络后再试一次。");
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -162,13 +173,14 @@ export function ManufacturingGame({ classCode }: { classCode: string }) {
           <h2>提交诊断方案</h2>
           <div className="grid gap-2.5">
             {manufacturingOptions.map((option) => (
-              <button className={`choice ${decision === option.id ? "active" : ""}`} key={option.id} onClick={() => changeDecision(option.id)} type="button">
+              <button className={`choice ${decision === option.id ? "active" : ""}`} disabled={isSubmitting} key={option.id} onClick={() => changeDecision(option.id)} type="button">
                 {option.label}
               </button>
             ))}
           </div>
           <button
             className="secondary-button mt-4"
+            disabled={isSubmitting}
             type="button"
             onClick={() => {
               setHintOpen(true);
@@ -185,7 +197,7 @@ export function ManufacturingGame({ classCode }: { classCode: string }) {
         <h2>选择你的判断依据</h2>
         <div className="grid gap-2.5 sm:grid-cols-2">
           {evidenceOptions.map((item) => (
-            <button className={`choice ${evidence.includes(item.id) ? "active" : ""}`} key={item.id} onClick={() => toggleEvidence(item.id)} type="button">
+            <button className={`choice ${evidence.includes(item.id) ? "active" : ""}`} disabled={isSubmitting} key={item.id} onClick={() => toggleEvidence(item.id)} type="button">
               {item.label}
             </button>
           ))}
@@ -194,12 +206,21 @@ export function ManufacturingGame({ classCode }: { classCode: string }) {
 
       <section className="panel">
         <h2>一句话说明维护建议</h2>
-        <input className="form-input" value={reflection} onChange={(event) => setReflection(event.target.value)} placeholder="例如：降低负载运行，安排复检并准备轴承更换预案" />
+        <input className="form-input" disabled={isSubmitting} value={reflection} onChange={(event) => setReflection(event.target.value)} placeholder="例如：降低负载运行，安排复检并准备轴承更换预案" />
         <div className="score-band mt-4">
           <span className="font-black tabular-nums">过程完整度 {score}</span>
           <div className="progress-track"><div className="progress-fill" style={{ width: `${score}%` }} /></div>
         </div>
-        <button className="primary-button mt-4 w-full sm:w-fit" disabled={!decision || evidence.length < 1} onClick={submit} type="button">提交并进入护理任务</button>
+        <LoadingButton
+          className="primary-button mt-4 w-full sm:w-fit"
+          disabled={!decision || evidence.length < 1}
+          loading={isSubmitting}
+          loadingText="正在保存诊断结果"
+          onClick={submit}
+        >
+          提交并进入护理任务
+        </LoadingButton>
+        {submitError ? <p className="mt-3 font-bold text-danger">{submitError}</p> : null}
       </section>
     </div>
   );
@@ -218,15 +239,6 @@ function EvidenceChart({
   legend: [string, string];
   rows: Array<[string, string, string]>;
 }) {
-  const bars =
-    type === "ai-warning"
-      ? [76, 52, 24]
-      : type === "temperature"
-        ? [69, 75, 62]
-        : type === "maintenance"
-          ? [35, 62, 78]
-          : [32, 41, 58];
-
   return (
     <figure className="my-4 rounded-2xl border border-line bg-blueprint-soft/45 p-4">
       <figcaption className="mb-3 flex items-start justify-between gap-3">
@@ -239,48 +251,11 @@ function EvidenceChart({
           <span className="rounded-lg bg-paper/80 px-2 py-1">设备 M-02</span>
           <span className="rounded-lg bg-paper/80 px-2 py-1">负载 87%</span>
         </div>
-        <div className="relative h-36 overflow-hidden rounded-xl border border-line bg-paper/70 p-3">
-        <div className="absolute inset-x-3 bottom-9 top-4 grid grid-rows-3">
-          <span className="border-t border-line/60" />
-          <span className="border-t border-line/60" />
-          <span className="border-t border-line/60" />
-        </div>
-        {type === "maintenance" ? (
-          <div className="relative z-10 flex h-full items-end justify-between gap-3 px-1 pb-8">
-            {["保养", "异响", "复检"].map((item, index) => (
-              <div className="grid flex-1 gap-2" key={item}>
-                <div className="rounded-t-lg bg-copper" style={{ height: `${bars[index]}px` }} />
-                <span className="text-center text-[11px] font-bold text-muted">{item}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <svg className="relative z-10 h-full w-full" viewBox="0 0 320 140" role="img" aria-label={title}>
-            <polyline
-              points={type === "temperature" ? "12,98 78,90 144,78 210,62 294,44" : "12,102 78,92 144,74 210,52 294,34"}
-              fill="none"
-              stroke="var(--color-danger)"
-              strokeWidth="9"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <polyline
-              points="12,104 78,102 144,99 210,97 294,96"
-              fill="none"
-              stroke="var(--color-blueprint)"
-              strokeWidth="6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity="0.72"
-            />
-            {type === "ai-warning" ? (
-              <text x="214" y="31" fill="var(--color-danger)" fontSize="18" fontWeight="900">76%</text>
-            ) : null}
-            {type === "temperature" ? (
-              <line x1="8" x2="304" y1="30" y2="30" stroke="var(--color-copper)" strokeDasharray="8 8" strokeWidth="4" />
-            ) : null}
-          </svg>
-        )}
+        <div className="min-h-44 overflow-hidden rounded-xl border border-line bg-paper/70 p-3">
+          {type === "ai-warning" ? <AiWarningPanel /> : null}
+          {type === "vibration" ? <VibrationPanel /> : null}
+          {type === "temperature" ? <TemperaturePanel /> : null}
+          {type === "maintenance" ? <MaintenanceTimeline /> : null}
         </div>
         <div className="overflow-hidden rounded-xl border border-line bg-surface/90 text-xs">
           {rows.map((row) => (
@@ -298,5 +273,108 @@ function EvidenceChart({
       </div>
       <p className="mt-3 text-sm leading-6 text-muted">{note}</p>
     </figure>
+  );
+}
+
+function AiWarningPanel() {
+  const factors = [
+    ["高频振动异常", 52, "主因"],
+    ["温度爬升", 24, "支持"],
+    ["维护后扰动", 14, "误报"],
+    ["负载偏高", 10, "干扰"]
+  ] as const;
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-xs font-black text-muted">综合风险</p>
+          <strong className="text-5xl font-black leading-none text-danger tabular-nums">76%</strong>
+        </div>
+        <span className="rounded-full bg-danger/10 px-3 py-1 text-xs font-black text-danger">建议复检</span>
+      </div>
+      <div className="grid gap-2">
+        {factors.map(([label, value, tag]) => (
+          <div className="grid grid-cols-[1fr_auto] gap-2" key={label}>
+            <div>
+              <div className="mb-1 flex justify-between text-xs font-bold text-muted">
+                <span>{label}</span>
+                <span>{value}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-line/70">
+                <div className="h-full rounded-full bg-copper" style={{ width: `${value}%` }} />
+              </div>
+            </div>
+            <span className="self-end rounded-lg bg-surface/80 px-2 py-1 text-[11px] font-black text-ink">{tag}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function VibrationPanel() {
+  return (
+    <div className="relative h-44">
+      <ChartGrid />
+      <svg className="relative z-10 h-full w-full" viewBox="0 0 320 176" role="img" aria-label="高频振动曲线">
+        <polyline points="12,128 48,124 84,130 120,98 156,108 192,66 228,78 264,36 306,48" fill="none" stroke="var(--color-danger)" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+        <polyline points="12,132 48,130 84,129 120,127 156,128 192,126 228,127 264,126 306,125" fill="none" stroke="var(--color-blueprint)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" opacity="0.72" />
+        <circle cx="264" cy="36" r="6" fill="var(--color-danger)" />
+        <text x="210" y="26" fill="var(--color-danger)" fontSize="13" fontWeight="900">峰值 5.8mm/s</text>
+      </svg>
+    </div>
+  );
+}
+
+function TemperaturePanel() {
+  return (
+    <div className="relative h-44">
+      <ChartGrid />
+      <svg className="relative z-10 h-full w-full" viewBox="0 0 320 176" role="img" aria-label="轴承座温度阶梯趋势">
+        <line x1="12" x2="306" y1="42" y2="42" stroke="var(--color-copper)" strokeDasharray="8 8" strokeWidth="4" />
+        <text x="222" y="34" fill="var(--color-copper)" fontSize="12" fontWeight="900">停机阈值 75°C</text>
+        <path d="M12 132 L72 132 L72 118 L132 118 L132 100 L192 100 L192 82 L252 82 L252 66 L306 66" fill="none" stroke="var(--color-danger)" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M12 140 C82 138 145 137 210 136 S282 134 306 134" fill="none" stroke="var(--color-blueprint)" strokeWidth="5" strokeLinecap="round" opacity="0.72" />
+        <text x="18" y="158" fill="var(--color-muted)" fontSize="11" fontWeight="800">08:10</text>
+        <text x="244" y="158" fill="var(--color-muted)" fontSize="11" fontWeight="800">08:35</text>
+      </svg>
+    </div>
+  );
+}
+
+function MaintenanceTimeline() {
+  const items = [
+    ["D-12", "轴承未更换", "寿命接近 82%"],
+    ["D-6", "更换润滑脂", "可能造成短时波动"],
+    ["D-3", "点检正常", "无持续异响"],
+    ["D-1", "操作员记录异响", "持续约 10 分钟"],
+    ["今日", "负载升至 87%", "需低负载复检"]
+  ] as const;
+
+  return (
+    <div className="grid gap-2 py-1">
+      {items.map(([time, title, detail], index) => (
+        <div className="grid grid-cols-[3.5rem_1rem_1fr] items-start gap-2" key={`${time}-${title}`}>
+          <span className="pt-0.5 text-xs font-black text-muted tabular-nums">{time}</span>
+          <span className={`mt-1 size-3 rounded-full ${index >= 3 ? "bg-danger" : "bg-copper"}`} />
+          <div className="rounded-xl bg-surface/85 px-3 py-2">
+            <strong className="block text-sm text-ink">{title}</strong>
+            <span className="text-xs font-semibold leading-5 text-muted">{detail}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChartGrid() {
+  return (
+    <div className="absolute inset-0 grid grid-rows-4">
+      <span className="border-t border-line/60" />
+      <span className="border-t border-line/60" />
+      <span className="border-t border-line/60" />
+      <span className="border-t border-line/60" />
+    </div>
   );
 }
